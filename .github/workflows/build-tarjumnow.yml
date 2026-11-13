@@ -1,0 +1,82 @@
+name: Build TarjumNow Android
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'TarjumNow-Android-Source.zip'
+      - '.github/workflows/build-tarjumnow.yml'
+
+permissions:
+  contents: read
+
+env:
+  WHISPER_CPP_TAG: v1.9.5
+
+jobs:
+  android:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Extract fresh Android project
+        run: unzip -q TarjumNow-Android-Source.zip -d .
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.2'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android build tools
+        run: sdkmanager "platforms;android-34" "build-tools;34.0.0" "ndk;25.2.9519653" "cmake;3.22.1"
+
+      - name: Fetch pinned whisper.cpp Android library
+        working-directory: TarjumNow
+        run: |
+          git clone --depth 1 --recurse-submodules --shallow-submodules --branch "$WHISPER_CPP_TAG" https://github.com/ggml-org/whisper.cpp.git whisper.cpp
+          JNI="whisper.cpp/examples/whisper.android/lib/src/main/jni/whisper/jni.c"
+          test -f "$JNI"
+          grep -q 'params.language = "en";' "$JNI"
+          sed -i 's/params.language = "en";/params.language = "tr";/' "$JNI"
+          sed -i 's/params.print_realtime = true;/params.print_realtime = false;/' "$JNI"
+          grep -q 'params.language = "tr";' "$JNI"
+          ! grep -q 'params.language = "en";' "$JNI"
+          LIB="whisper.cpp/examples/whisper.android/lib/build.gradle"
+          python3 - <<'PYCODE'
+          from pathlib import Path
+          p = Path("whisper.cpp/examples/whisper.android/lib/build.gradle")
+          s = p.read_text()
+          if "kotlinx-coroutines-core" not in s:
+              s = s.replace("dependencies {", "dependencies {\n    implementation 'org.jetbrains.kotlinx:kotlinx-coroutines-core:1.7.3'", 1)
+          if "-DCMAKE_BUILD_TYPE=Release" not in s:
+              s = s.replace("    buildTypes {", "    buildTypes {\n        debug { externalNativeBuild { cmake { arguments '-DCMAKE_BUILD_TYPE=Release' } } }", 1)
+          p.write_text(s)
+          PYCODE
+          grep -q 'kotlinx-coroutines-core' "$LIB"
+          grep -q 'DCMAKE_BUILD_TYPE=Release' "$LIB"
+
+      - name: Run unit tests
+        working-directory: TarjumNow
+        run: gradle :app:testDebugUnitTest --no-daemon
+
+      - name: Build debug APK
+        working-directory: TarjumNow
+        run: gradle :app:assembleDebug --no-daemon
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: TarjumNow-debug-apk
+          path: TarjumNow/app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
+          retention-days: 14
